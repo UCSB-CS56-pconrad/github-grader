@@ -36,15 +36,35 @@ def clone_javadoc_repos(repos, parent_dir):
         if 'javadoc' in repo.name:
             count += 1
             clone_or_update(parent_dir, repo, count)
+
+def parse_ant_output(output):
+    lines = output.split('\n')
+    print lines
+    test_results = {}
+    suite = None
+    for line in lines:
+        if '[junit] Testsuite:' in line:
+            suite = line.strip()[19:]
+        elif '[junit] Tests run:' in line and suite:
+            translated = line.strip().translate(None, ',')
+            segments = translated.split()
+            total = int(segments[3])
+            errors = int(segments[5]) + int(segments[7]) + int(segments[9])
+            test_results[suite] = (total,errors)
+            suite = None
+    return test_results
             
 def validate_source_repo(repo, parent_dir):
     repo_path = os.path.join(parent_dir, repo.name)
     print '\nValidating source repo {}'.format(repo_path)
     print '======================================================='
-    p = subprocess.Popen(['ant', 'test'], cwd=repo_path)
-    status = p.wait()
-    print 'Build exited with status', status
-    return status
+    p = subprocess.Popen(['ant', 'test'], cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output = p.communicate()
+    print 'Build exited with status', p.returncode
+    print output[0]
+    if p.returncode == 0:
+        return True, parse_ant_output(output[0])
+    return False, None
 
 def validate_javadoc_repo(repo):
     return repo.default_branch == 'gh-pages' and not repo.private
@@ -57,12 +77,30 @@ def create_if_not_exists(dir):
     if not os.path.exists(dir):
         print 'Creating directory:', dir
         os.makedirs(dir)
+
+def test_result_summary(results, suite=None):
+    total = 0
+    errors = 0
+    for k,v in results.items():
+        if suite is None or k == suite:
+            total += v[0]
+            errors += v[1]
+    return '{0}/{1}'.format(total-errors, total)
+
+def get_all_repos():
+    token = open('token', 'r')
+    data = token.read()
+    token.close()
+    g = Github(data.strip())
+    org = g.get_organization(args.org)
+    return org.get_repos()
     
 if __name__  == '__main__':
     parser = argparse.ArgumentParser(description='Grades a lab by downloading student submissions from Github.com.')
     parser.add_argument('--org', '-o', dest='org', default='UCSB-CS56-M16')
     parser.add_argument('--lab', '-l', dest='lab', default=None)
     parser.add_argument('--path', '-p', dest='path', default='repos')
+    parser.add_argument('--skip-update', '-s', dest='skip_update', action='store_true', default=False)
     args = parser.parse_args()
 
     if not args.lab:
@@ -74,13 +112,7 @@ if __name__  == '__main__':
     javadoc_path = os.path.join(args.path, 'javadoc')
     create_if_not_exists(javadoc_path)
     
-    token = open('token', 'r')
-    data = token.read()
-    token.close()
-    g = Github(data.strip())
-    org = g.get_organization(args.org)
-    all_gh_repos = org.get_repos()
-    
+    all_gh_repos = get_all_repos()
     source_repos = [r for r in all_gh_repos if args.lab in r.name and 'javadoc' not in r.name]
     print 'Found {0} source repos'.format(len(source_repos))
     javadoc_repos = [r for r in all_gh_repos if args.lab in r.name and 'javadoc' in r.name]
@@ -92,14 +124,15 @@ if __name__  == '__main__':
         repo_owners[repo.name] = get_username(repo)
     for repo in javadoc_repos:
         repo_owners[repo.name] = get_username(repo)
-        
-    clone_source_repos(source_repos, source_path)
-    clone_javadoc_repos(javadoc_repos, javadoc_path)
+
+    if not args.skip_update:
+        clone_source_repos(source_repos, source_path)
+        clone_javadoc_repos(javadoc_repos, javadoc_path)
 
     build_status = {}
     for repo in source_repos:
-        status = validate_source_repo(repo, source_path)
-        build_status[repo_owners[repo.name]] = bool(status)
+        status,test_results = validate_source_repo(repo, source_path)
+        build_status[repo_owners[repo.name]] = (status,test_results)
         
     javadoc_status = {}
     for repo in javadoc_repos:
@@ -107,7 +140,11 @@ if __name__  == '__main__':
 
     print '\n\nResults Summary'
     print '===================='
-    print '[summary] Repo Owner BuildStatus JavadocStatus'
+    print '[summary] Repo Owner BuildStatus Tests JavadocStatus'
     for repo in source_repos:
         owner = repo_owners[repo.name]
-        print '[summary]', repo.name, owner, build_status.get(owner, '-'), javadoc_status.get(owner, '-')
+        result = build_status.get(owner, '-')
+        test_summary = '-'
+        if result[0]:
+            test_summary = test_result_summary(result[1])
+        print '[summary]', repo.name, owner, result[0], test_summary, javadoc_status.get(owner, '-')
