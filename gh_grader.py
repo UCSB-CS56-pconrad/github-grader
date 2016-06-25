@@ -233,14 +233,24 @@ class JavadocPhase:
         self.javadoc_status = {}
 
     @staticmethod
-    def validate_javadoc_repo(repo):
-        return repo.default_branch == 'gh-pages' and not repo.private
+    def validate_javadoc_repo(repo, parent_dir, child_dir):
+        repo_path = os.path.join(parent_dir, repo.name)
+        print '\nValidating javadoc repo {}'.format(repo_path)
+        print '======================================================='        
+        branch = (repo.default_branch == 'gh-pages')
+        public = (not repo.private)
+        dir_exists = os.path.exists(os.path.join(repo_path, child_dir))
+        print 'Default branch set to gh-pages:', branch
+        print 'Public repo:', public
+        print 'Javadoc directory exists:', dir_exists
+        return branch and public and dir_exists
 
     def run(self):
         if not self.enabled:
             return
         for repo in self.context.javadoc_repos:
-            self.javadoc_status[repo.owner] = JavadocPhase.validate_javadoc_repo(repo)
+            status = JavadocPhase.validate_javadoc_repo(repo, self.context.javadoc_path, 'javadoc')
+            self.javadoc_status[repo.owner] = status
 
 class ValidatePhase:
     name = 'validate'
