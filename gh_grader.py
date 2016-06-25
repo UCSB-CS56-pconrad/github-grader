@@ -98,16 +98,17 @@ def create_if_not_exists(dir):
         print 'Creating directory:', dir
         os.makedirs(dir)
 
+def get_filename_without_ext(path):
+    basename = os.path.basename(path)
+    return os.path.splitext(basename)[0]
+
 def test_result_summary(results, suite=None):
-    suite_name = None
-    if suite:
-        basename = os.path.basename(suite)
-        suite_name = os.path.splitext(basename)[0]
-    
+    if not results[0]:
+        return '-'
     total = 0
     errors = 0
-    for k,v in results.items():
-        if suite_name is None or k == suite_name:
+    for k,v in results[1].items():
+        if suite is None or k == suite:
             total += v[0]
             errors += v[1]
     return '{0}/{1}'.format(total-errors, total)
@@ -119,7 +120,28 @@ def get_all_repos():
     g = Github(data.strip())
     org = g.get_organization(args.org)
     return org.get_repos()
-    
+
+def build_phase(repos, owners):
+    build_status = {}
+    for repo in repos:
+        status,test_results = validate_source_repo(repo, source_path)
+        build_status[owners[repo.name]] = (status,test_results)
+    return build_status
+
+def javadoc_phase(repos, owners):
+    javadoc_status = {}
+    for repo in repos:
+        javadoc_status[owners[repo.name]] = validate_javadoc_repo(repo)
+    return javadoc_status
+
+def instructor_test_phase(repos, owners, test_class):
+    instructor_test_status = {}
+    if test_class:
+        for repo in repos:
+            status,test_results = instructor_validate_source_repo(args.test_class, repo, source_path)
+            instructor_test_status[owners[repo.name]] = (status,test_results)
+    return instructor_test_status
+
 if __name__  == '__main__':
     parser = argparse.ArgumentParser(description='Grades a lab by downloading student submissions from Github.com.')
     parser.add_argument('--org', '-o', dest='org', default='UCSB-CS56-M16')
@@ -155,20 +177,9 @@ if __name__  == '__main__':
         clone_source_repos(source_repos, source_path)
         clone_javadoc_repos(javadoc_repos, javadoc_path)
 
-    build_status = {}
-    for repo in source_repos:
-        status,test_results = validate_source_repo(repo, source_path)
-        build_status[repo_owners[repo.name]] = (status,test_results)
-        
-    javadoc_status = {}
-    for repo in javadoc_repos:
-        javadoc_status[repo_owners[repo.name]] = validate_javadoc_repo(repo)
-
-    instructor_test_status = {}
-    if args.test_class:
-        for repo in source_repos:
-            status,test_results = instructor_validate_source_repo(args.test_class, repo, source_path)
-            instructor_test_status[repo_owners[repo.name]] = (status,test_results)
+    build_status = build_phase(source_repos, repo_owners)        
+    javadoc_status = javadoc_phase(javadoc_repos, repo_owners)
+    instructor_test_status = instructor_test_phase(source_repos, repo_owners, args.test_class)
 
     print '\n\nResults Summary'
     print '===================='
@@ -176,13 +187,9 @@ if __name__  == '__main__':
     for repo in source_repos:
         owner = repo_owners[repo.name]
         result = build_status[owner]
-        test_summary = '-'
-        if result[0]:
-            test_summary = test_result_summary(result[1])
-
+        test_summary = test_result_summary(result)
         i_test_summary = '-'
         if args.test_class:
             i_result = instructor_test_status[owner]
-            if i_result[0]:
-                i_test_summary = test_result_summary(i_result[1], args.test_class)
+            i_test_summary = test_result_summary(i_result, get_filename_without_ext(args.test_class))
         print '[summary]', repo.name, owner, result[0], test_summary, i_test_summary, javadoc_status.get(owner, '-')
