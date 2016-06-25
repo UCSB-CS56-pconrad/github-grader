@@ -299,7 +299,7 @@ def print_output_header(context):
     if context.phase_enabled('javadoc'):
         header += ' Javadoc'
     if context.phase_enabled('validate'):
-        header += ' Validate'
+        header += ' ValidateBuild ValidateTest'
     print header
 
 def get_phase(phases, name):
@@ -341,6 +341,7 @@ if __name__  == '__main__':
         if context.phase_enabled('javadoc'):
             print get_phase(phases, 'javadoc').javadoc_status.get(repo.owner, '-'),
         if context.phase_enabled('validate'):
-            print get_phase(phases, 'validate').get_summary(repo.owner),
+            validate = get_phase(phases, 'validate')
+            print validate.test_status.get(repo.owner, '-'),
+            print validate.get_summary(repo.owner),
         print
-            
