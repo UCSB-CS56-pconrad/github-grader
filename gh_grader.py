@@ -23,6 +23,8 @@ class RepoInfo:
         if args.skip:
             for skip in args.skip:
                 self.phases.remove(skip)
+        if 'test' in self.phases and not args.test_class:
+            self.phases.remove('test')
         self.source_path = os.path.join(args.path, 'source')
         self.javadoc_path = os.path.join(args.path, 'javadoc')
         self.__get_repos()
@@ -166,10 +168,9 @@ def test_phase(repo_info):
     if 'test' not in repo_info.phases:
         return {}
     test_status = {}
-    if repo_info.args.test_class:
-        for repo in repo_info.source_repos:
-            status, test_results = test_source_repo(repo_info.args.test_class, repo, repo_info.source_path)
-            test_status[repo_info.owners[repo.name]] = (status, test_results)
+    for repo in repo_info.source_repos:
+        status, test_results = test_source_repo(repo_info.args.test_class, repo, repo_info.source_path)
+        test_status[repo_info.owners[repo.name]] = (status, test_results)
     return test_status
 
 def test_result_summary(results, suite=None):
@@ -214,7 +215,7 @@ if __name__  == '__main__':
     test_status = test_phase(repo_info)
     
     print_output_header(repo_info)
-    for repo in repo_info.source_repos:
+    for repo in sorted(repo_info.source_repos, cmp=lambda x,y:cmp(x.name,y.name)):
         owner = repo_info.owners[repo.name]
         summary = ['[summary]', repo.name, owner]
         if 'build' in repo_info.phases:
