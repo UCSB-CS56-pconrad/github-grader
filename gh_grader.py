@@ -4,231 +4,343 @@ import subprocess
 import sys
 import time
 import os
+import yaml
 
 from github import Github
 
-def get_username(repo):
-    contribs = repo.get_contributors()
-    names = sorted([c.login for c in contribs])
-    return '/'.join(names)
+class Context:
+    def __init__(self, config):
+        self.config = config
 
-def get_filename_without_ext(path):
-    basename = os.path.basename(path)
-    return os.path.splitext(basename)[0]
+    def phase_enabled(self, name):
+        phase = self.config.get(name, {})
+        return phase.get('enabled', True)
+        
+    def get_config(self, name, default):
+        segments = name.split('.')
+        map = self.config
+        for segment in segments:
+            map = map.get(segment, None)
+            if map is None:
+                return default
+        return map
 
-class RepoInfo:
-    def __init__(self, args):
-        self.args = args
-        self.phases = ['update', 'build', 'javadoc', 'test']
-        if args.skip:
-            for skip in args.skip:
-                self.phases.remove(skip)
-        if 'test' in self.phases and not args.test_class:
-            self.phases.remove('test')
-        self.source_path = os.path.join(args.path, 'source')
-        self.javadoc_path = os.path.join(args.path, 'javadoc')
-        self.__get_repos()
-        self.__get_ownership_info()
+class Repo:
+    def __init__(self, repo, owner):
+        self.name = repo.name
+        self.clone_url = repo.clone_url
+        self.default_branch = repo.default_branch
+        self.private = repo.private
+        self.owner = owner
+    
+class InitPhase:
+    name = 'init'
+    
+    def __init__(self, context):
+        self.context = context
+        self.target = context.get_config('init.target', 'target')
+        self.org_name = context.get_config('init.org', None)
+        if self.org_name is None:
+            raise Exception('Github organization not specified')
+        self.source_prefix = context.get_config('init.source_prefix', None)
+        if self.source_prefix is None:
+            raise Exception('Source prefix not specified')
+        self.javadoc_prefix = context.get_config('init_javadoc_prefix', self.source_prefix + 'javadoc_')
 
-    def __get_repos(self):
+    def __get_github_client(self):
         token = open('token', 'r')
         data = token.read()
         token.close()
-        g = Github(data.strip())
-        org = g.get_organization(self.args.org)
+        return Github(data.strip())
+        
+    def run(self):
+        self.context.source_path = os.path.join(self.target, 'source')
+        self.context.javadoc_path = os.path.join(self.target, 'javadoc')
+        g = self.__get_github_client()
+        org = g.get_organization(self.org_name)
         all_gh_repos = org.get_repos()
-        self.source_repos = [r for r in all_gh_repos if self.args.lab in r.name and 'javadoc' not in r.name]
-        print 'Found {0} source repos'.format(len(self.source_repos))
-        self.javadoc_repos = [r for r in all_gh_repos if self.args.lab in r.name and 'javadoc' in r.name]
-        print 'Found {0} javadoc repos'.format(len(self.javadoc_repos))
+        members = org.get_members()
+        source_repos = []
+        javadoc_repos = []
+        for member in members:
+            source_repo = self.source_prefix + member.login
+            javadoc_repo = self.javadoc_prefix + member.login
+            for r in all_gh_repos:
+                if r.name == source_repo:
+                    source_repos.append(Repo(r, member.login))
+                elif r.name == javadoc_repo:
+                    javadoc_repos.append(Repo(r, member.login))
+        print 'Found {0} source repos'.format(len(source_repos))
+        print 'Found {0} javadoc repos'.format(len(javadoc_repos))
+        self.context.source_repos = source_repos
+        self.context.javadoc_repos = javadoc_repos
 
-    def __get_ownership_info(self):
-        print 'Calculating repo ownership information...'
-        self.owners = {}
-        for repo in self.source_repos:
-            owner = get_username(repo)
-            print repo.name, '-->', owner
-            self.owners[repo.name] = owner
-        if 'javadoc' in self.phases:
-            for repo in self.javadoc_repos:
-                owner = get_username(repo)
-                print repo.name, '-->', owner
-                self.owners[repo.name] = owner
+class UpdatePhase:
+    name = 'update'
+    
+    def __init__(self, context):
+        self.context = context
+        self.enabled = context.phase_enabled('update')
 
-def clone_or_update(parent_dir, repo, count):
-    repo_path = os.path.join(parent_dir, repo.name)
-    if os.path.exists(os.path.join(repo_path)):
-        print '\n[{0}] Pulling from repo {1}'.format(count, repo.clone_url)
-        print '==========================================================='
-        p = subprocess.Popen(['git', 'pull'], cwd=repo_path)
-        p.wait()
-    else:
-        print '\n[{0}] Cloning from repo {1}'.format(count, repo.clone_url)
-        print '==========================================================='
-        p = subprocess.Popen(['git', 'clone', repo.clone_url], cwd=parent_dir)
-        p.wait()
+    @staticmethod
+    def create_if_not_exists(dir):
+        if not os.path.exists(dir):
+            print 'Creating directory:', dir
+            os.makedirs(dir)
 
-def clone_repos(repos, parent_dir):
-    count = 0
-    time.sleep(1)
-    for repo in repos:
-        count += 1
-        clone_or_update(parent_dir, repo, count)
+    @staticmethod
+    def clone_or_update(parent_dir, repo, count):
+        repo_path = os.path.join(parent_dir, repo.name)
+        if os.path.exists(os.path.join(repo_path)):
+            print '\n[{0}] Pulling from repo {1}'.format(count, repo.clone_url)
+            print '==========================================================='
+            p = subprocess.Popen(['git', 'pull'], cwd=repo_path)
+            p.wait()
+        else:
+            print '\n[{0}] Cloning from repo {1}'.format(count, repo.clone_url)
+            print '==========================================================='
+            p = subprocess.Popen(['git', 'clone', repo.clone_url], cwd=parent_dir)
+            p.wait()
 
-def create_if_not_exists(dir):
-    if not os.path.exists(dir):
-        print 'Creating directory:', dir
-        os.makedirs(dir)
+    @staticmethod
+    def clone_repos(repos, parent_dir):
+        count = 0
+        time.sleep(1)
+        for repo in repos:
+            count += 1
+            UpdatePhase.clone_or_update(parent_dir, repo, count)
+
+    def run(self):
+        if not self.enabled:
+            return
+        UpdatePhase.create_if_not_exists(self.context.source_path)
+        print '\nCloning source repos...'
+        UpdatePhase.clone_repos(self.context.source_repos, self.context.source_path)
+        if self.context.phase_enabled('javadoc'):
+            UpdatePhase.create_if_not_exists(self.context.javadoc_path)
+            print '\nCloning javadoc repos...'
+            UpdatePhase.clone_repos(self.context.javadoc_repos, self.context.javadoc_path)
         
-def update_phase(repo_info):
-    if 'update' not in repo_info.phases:
-        return
-    create_if_not_exists(repo_info.source_path)
-    print '\nCloning source repos...'
-    clone_repos(repo_info.source_repos, repo_info.source_path)
-    if 'javadoc' in repo_info.phases:
-        create_if_not_exists(repo_info.javadoc_path)
-        print '\nCloning javadoc repos...'
-        clone_repos(repo_info.javadoc_repos, repo_info.javadoc_path)
+class BuildPhase:
+    name = 'build'
+    
+    def __init__(self, context):
+        self.context = context
+        self.enabled = context.phase_enabled('build')
+        self.build_status = {}
 
-def parse_ant_output(output):
-    lines = output.split('\n')
-    test_results = {}
-    suite = None
-    for line in lines:
-        if '[junit] Testsuite:' in line:
-            suite = line.strip()[19:]
-        elif '[junit] Tests run:' in line and suite:
-            translated = line.strip().translate(None, ',')
-            segments = translated.split()
-            total = int(segments[3])
-            errors = int(segments[5]) + int(segments[7]) + int(segments[9])
-            test_results[suite] = (total,errors)
-            suite = None
-    return test_results
+    @staticmethod
+    def build_source_repo(repo, parent_dir):
+        repo_path = os.path.join(parent_dir, repo.name)
+        print '\nBuilding source repo {}'.format(repo_path)
+        print '======================================================='
+        if not os.path.exists(repo_path):
+            print 'No local copy available'
+            return False
+        p = subprocess.Popen(['ant', 'compile'], cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = p.communicate()
+        print output[0]
+        if output[1]:
+            print output[1]
+        print 'Build exited with status', p.returncode
+        return p.returncode == 0
         
-def build_source_repo(repo, parent_dir):
-    repo_path = os.path.join(parent_dir, repo.name)
-    print '\nBuilding source repo {}'.format(repo_path)
-    print '======================================================='
-    if not os.path.exists(repo_path):
-        print 'No local copy available'
+    def run(self):
+        if not self.enabled:
+            return
+        for repo in self.context.source_repos:
+            status = BuildPhase.build_source_repo(repo, self.context.source_path)
+            self.build_status[repo.owner] = status
+
+class TestResult:
+    def __init__(self, suite, total, errors):
+        self.suite = suite
+        self.total = total
+        self.errors = errors
+
+    def __str__(self):
+        return '{0}/{1}'.format(self.total - self.errors, self.total)
+            
+class TestPhase:
+    name = 'test'
+    
+    def __init__(self, context):
+        self.context = context
+        self.enabled = context.phase_enabled('test')
+        self.test_status = {}
+        self.test_results = {}
+
+    def get_summary(self, owner):
+        total = 0
+        errors = 0
+        results = self.test_results.get(owner)
+        if results is None:
+            results = []
+        for tr in results:
+            total += tr.total
+            errors = tr.errors
+        return TestResult('summary', total, errors)
+
+    @staticmethod
+    def parse_ant_output(output):
+        lines = output.split('\n')
+        test_results = []
+        suite = None
+        for line in lines:
+            if '[junit] Testsuite:' in line:
+                suite = line.strip()[19:]
+            elif '[junit] Tests run:' in line and suite:
+                translated = line.strip().translate(None, ',')
+                segments = translated.split()
+                total = int(segments[3])
+                errors = int(segments[5]) + int(segments[7]) + int(segments[9])
+                test_results.append(TestResult(suite, total, errors))
+                suite = None
+        return test_results
+
+    @staticmethod
+    def test_source_repo(repo, parent_dir):
+        repo_path = os.path.join(parent_dir, repo.name)
+        print '\nTesting source repo {}'.format(repo_path)
+        print '======================================================='
+        if not os.path.exists(repo_path):
+            print 'No local copy available'
+            return False, None
+        p = subprocess.Popen(['ant', 'test'], cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = p.communicate()
+        print output[0]
+        if output[1]:
+            print output[1]
+        print 'Build exited with status', p.returncode
+        if p.returncode == 0:
+            return True, TestPhase.parse_ant_output(output[0])
         return False, None
-    p = subprocess.Popen(['ant', 'test'], cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    output = p.communicate()
-    print output[0]
-    if output[1]:
-        print output[1]
-    print 'Build exited with status', p.returncode
-    test_results = parse_ant_output(output[0])
-    return p.returncode == 0, test_results
         
-def build_phase(repo_info):
-    if 'build' not in repo_info.phases:
-        return {}
-    build_status = {}
-    for repo in repo_info.source_repos:
-        status, test_results = build_source_repo(repo, repo_info.source_path)
-        build_status[repo_info.owners[repo.name]] = (status, test_results)
-    return build_status
+    def run(self):
+        if not self.enabled:
+            return
+        for repo in self.context.source_repos:
+            status, results = TestPhase.test_source_repo(repo, self.context.source_path)
+            self.test_status[repo.owner] = status
+            self.test_results[repo.owner] = results
 
-def validate_javadoc_repo(repo):
-    return repo.default_branch == 'gh-pages' and not repo.private
+class JavadocPhase:
+    name = 'javadoc'
+    
+    def __init__(self, context):
+        self.context = context
+        self.enabled = context.phase_enabled('javadoc')
+        self.javadoc_status = {}
 
-def javadoc_phase(repo_info):
-    if 'javadoc' not in repo_info.phases:
-        return {}
-    javadoc_status = {}
-    for repo in repo_info.javadoc_repos:
-        javadoc_status[repo_info.owners[repo.name]] = validate_javadoc_repo(repo)
-    return javadoc_status
+    @staticmethod
+    def validate_javadoc_repo(repo):
+        return repo.default_branch == 'gh-pages' and not repo.private
 
-def test_source_repo(test_class, repo, parent_dir):
-    repo_path = os.path.join(parent_dir, repo.name)
-    basename = os.path.basename(test_class)
-    suite = get_filename_without_ext(test_class)
-    src_path = os.path.join(repo_path, 'src')
-    if not os.path.exists(src_path):
-        print 'Failed to locate the src directory:', src_path
-        return False, None
-    shutil.copy(test_class, src_path)
-    print '\nTesting source repo {}'.format(repo_path)
-    print '======================================================='
-    p = subprocess.Popen(['ant', 'test'], cwd=repo_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    output = p.communicate()
-    print output[0]
-    if output[1]:
-        print output[1]
-    print 'Build exited with status', p.returncode
-    os.remove(os.path.join(src_path, basename))
-    test_results = parse_ant_output(output[0])
-    return p.returncode == 0, test_results
+    def run(self):
+        if not self.enabled:
+            return
+        for repo in self.context.javadoc_repos:
+            self.javadoc_status[repo.owner] = JavadocPhase.validate_javadoc_repo(repo)
 
-def test_phase(repo_info):
-    if 'test' not in repo_info.phases:
-        return {}
-    test_status = {}
-    for repo in repo_info.source_repos:
-        status, test_results = test_source_repo(repo_info.args.test_class, repo, repo_info.source_path)
-        test_status[repo_info.owners[repo.name]] = (status, test_results)
-    return test_status
+class ValidatePhase:
+    name = 'validate'
+    
+    def __init__(self, context):
+        self.context = context
+        self.enabled = context.phase_enabled('validate')
+        self.test_class = context.get_config('validate.test_class', None)
+        if self.test_class:
+            basename = os.path.basename(self.test_class)
+            self.test_suite_name = os.path.splitext(basename)[0]
+        else:
+            self.test_suite_name = None
+        self.test_status = {}
+        self.test_results = {}
 
-def test_result_summary(results, suite=None):
-    total = 0
-    errors = 0
-    if results[1]:
-        for k,v in results[1].items():
-            if suite is None or k == suite:
-                total += v[0]
-                errors += v[1]
-    return '{0}/{1}'.format(total-errors, total)
+    def get_summary(self, owner):
+        total = 0
+        errors = 0
+        results = self.test_results.get(owner)
+        if results is None:
+            results = []
+        for tr in results:
+            total += tr.total
+            errors = tr.errors
+        return TestResult('summary', total, errors)
 
-def print_output_header(repo_info):
+    @staticmethod
+    def test_source_repo(test_class, repo, parent_dir):
+        repo_path = os.path.join(parent_dir, repo.name)
+        src_path = os.path.join(repo_path, 'src')
+        if not os.path.exists(src_path):
+            print 'Failed to locate the src directory:', src_path
+            return False, None
+        shutil.copy(test_class, src_path)
+        status, results = TestPhase.test_source_repo(repo, parent_dir)
+        os.remove(os.path.join(src_path, os.path.basename(test_class)))
+        return status, results
+            
+    def run(self):
+        if not self.enabled or self.test_class is None:
+            return
+        for repo in self.context.source_repos:
+            status, results = ValidatePhase.test_source_repo(self.test_class, repo, self.context.source_path)
+            self.test_status[repo.owner] = status
+            self.test_results[repo.owner] = results
+            
+def print_output_header(context):
     print '\n\nResults Summary'
     print '===================='
     header = '[summary] Repo Owner'
-    if 'build' in repo_info.phases:
-        header += ' StudentBuild StudentTests'
-    if 'javadoc' in repo_info.phases:
+    if context.phase_enabled('build'):
+        header += ' Build'
+    if context.phase_enabled('test'):
+        header += ' Test'
+    if context.phase_enabled('javadoc'):
         header += ' Javadoc'
-    if 'test' in repo_info.phases and repo_info.args.test_class:
-        header += ' InstructorBuild InstructorTests'
+    if context.phase_enabled('validate'):
+        header += ' Validate'
     print header
 
+def get_phase(phases, name):
+    for phase in phases:
+        if phase.name == name:
+            return phase
+    return None
+    
 if __name__  == '__main__':
     parser = argparse.ArgumentParser(description='Grades a lab by downloading student submissions from Github.com.')
-    parser.add_argument('--org', '-o', dest='org', default='UCSB-CS56-M16')
-    parser.add_argument('--lab', '-l', dest='lab', default=None)
-    parser.add_argument('--path', '-p', dest='path', default='repos')
-    parser.add_argument('--test-class', '-t', dest='test_class', default=None)
-    parser.add_argument('--skip', '-s', dest='skip', nargs='*')
+    parser.add_argument('--file', '-f', dest='file', default=None)
     args = parser.parse_args()
 
-    if not args.lab:
-        print 'Lab not specified'
+    if not args.file:
+        print 'Configuration file not specified'
         sys.exit(1)
 
-    repo_info = RepoInfo(args)
-    update_phase(repo_info)
-    build_status = build_phase(repo_info)        
-    javadoc_status = javadoc_phase(repo_info)
-    test_status = test_phase(repo_info)
-    
-    print_output_header(repo_info)
-    for repo in sorted(repo_info.source_repos, cmp=lambda x,y:cmp(x.name,y.name)):
-        owner = repo_info.owners[repo.name]
-        summary = ['[summary]', repo.name, owner]
-        if 'build' in repo_info.phases:
-            result = build_status[owner]
-            summary.append(result[0])
-            summary.append(test_result_summary(result))
-        if 'javadoc' in repo_info.phases:
-            summary.append(javadoc_status.get(owner, '-'))
-        if 'test' in repo_info.phases:
-            if test_status:
-                result = test_status[owner]
-                summary.append(result[0])
-                summary.append(test_result_summary(result))
-        for item in summary:
-            print item,
+    with open(args.file, 'r') as f:
+        doc = yaml.load(f)
+    context = Context(doc)
+    phases = [
+        InitPhase(context),
+        UpdatePhase(context),
+        BuildPhase(context),
+        TestPhase(context),
+        JavadocPhase(context),
+        ValidatePhase(context)
+    ]
+
+    for phase in phases:
+        phase.run()
+    print_output_header(context)
+    for repo in context.source_repos:
+        print '[summary] {0} {1}'.format(repo.name, repo.owner),
+        if context.phase_enabled('build'):
+            print get_phase(phases, 'build').build_status.get(repo.owner, '-'),
+        if context.phase_enabled('test'):
+            print get_phase(phases, 'test').get_summary(repo.owner),
+        if context.phase_enabled('javadoc'):
+            print get_phase(phases, 'javadoc').javadoc_status.get(repo.owner, '-'),
+        if context.phase_enabled('validate'):
+            print get_phase(phases, 'validate').get_summary(repo.owner),
         print
+            
