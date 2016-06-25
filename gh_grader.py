@@ -9,7 +9,8 @@ from github import Github
 
 def get_username(repo):
     contribs = repo.get_contributors()
-    return contribs[0].login
+    names = sorted([c.login for c in contribs])
+    return '/'.join(names)
 
 def get_filename_without_ext(path):
     basename = os.path.basename(path)
