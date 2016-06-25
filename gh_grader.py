@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 import os
+import requests
 import yaml
 
 from github import Github
@@ -233,23 +234,28 @@ class JavadocPhase:
         self.javadoc_status = {}
 
     @staticmethod
-    def validate_javadoc_repo(repo, parent_dir, child_dir):
+    def validate_javadoc_repo(repo, parent_dir, child_dir, org):
         repo_path = os.path.join(parent_dir, repo.name)
         print '\nValidating javadoc repo {}'.format(repo_path)
         print '======================================================='        
         branch = (repo.default_branch == 'gh-pages')
         public = (not repo.private)
         dir_exists = os.path.exists(os.path.join(repo_path, child_dir))
+        url = 'http://{}.github.io/{}/{}'.format(org.lower(), repo.name, child_dir)
+        resp = requests.get(url)
+        published = resp.status_code == 200
         print 'Default branch set to gh-pages:', branch
         print 'Public repo:', public
         print 'Javadoc directory exists:', dir_exists
-        return branch and public and dir_exists
+        print 'Published to web:', published
+        return branch and public and dir_exists and published
 
     def run(self):
         if not self.enabled:
             return
+        org = self.context.get_config('init.org', None)
         for repo in self.context.javadoc_repos:
-            status = JavadocPhase.validate_javadoc_repo(repo, self.context.javadoc_path, 'javadoc')
+            status = JavadocPhase.validate_javadoc_repo(repo, self.context.javadoc_path, 'javadoc', org)
             self.javadoc_status[repo.owner] = status
 
 class ValidatePhase:
